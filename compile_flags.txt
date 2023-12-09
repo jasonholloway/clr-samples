@@ -1,0 +1,15 @@
+-shared
+--no-undefined
+-Wno-invalid-noreturn
+-fPIC
+-fms-extensions
+-DHOST_64BIT
+-DBIT64
+-DPAL_STDCPP_COMPAT
+-DPLATFORM_UNIX
+-std=c++11
+-I/home/jason/src/coreclr-3.1.32/src/pal/inc/rt
+-I/home/jason/src/coreclr-3.1.32/src/pal/prebuilt/inc
+-I/home/jason/src/coreclr-3.1.32/src/pal/inc
+-I/home/jason/src/coreclr-3.1.32/src/inc
+-I/home/jason/src/coreclr-3.1.32/bin/Product/Linux.x64.Debug/inc

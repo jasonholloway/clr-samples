@@ -5,16 +5,177 @@
 #include "corhlpr.h"
 #include "CComPtr.h"
 #include "profiler_pal.h"
+#include <cstddef>
+#include <cuchar>
 #include <string>
+#include <cstring>
+#include <iostream>
+#include <sstream>
+#include <locale>
+#include <codecvt>
+#include <chrono>
+#include <thread>
+#include <stack>
+#include <vector>
+#include <utility>
+
+using namespace std;
+
+ICorProfilerInfo8 *pInfo = nullptr;
+
+
+void Error(const char *str) {
+    printf("ERROR! %s\n", str);
+}
+
+std::wstring_convert<std::codecvt_utf8_utf16<char16_t>,char16_t> convert;
+
+
+typedef struct CallInfo {
+    std::chrono::high_resolution_clock::time_point started;
+    FunctionID funcID;
+    mdToken funcToken;
+    ClassID classID;
+    ModuleID moduleID;
+
+    ULONG argInfoSize;
+    unique_ptr<COR_PRF_FUNCTION_ARGUMENT_INFO> pArgInfo;
+    COR_PRF_FRAME_INFO frameInfo;
+
+    void HandleEnter(ostringstream *oss, FunctionID funcID, COR_PRF_ELT_INFO elt) {
+        HRESULT hr;
+
+        this->funcID = funcID;
+        hr = pInfo->GetFunctionInfo(funcID, &this->classID, &this->moduleID, &this->funcToken);
+        if(FAILED(hr)) return Error("func info");
+
+        ULONG argumentInfoSize = 0;
+        COR_PRF_FRAME_INFO frameInfo;
+        hr = pInfo->GetFunctionEnter3Info(this->funcID, elt, &this->frameInfo, &this->argInfoSize, NULL);
+
+        unsigned char *buffer = new unsigned char[this->argInfoSize];
+        hr = pInfo->GetFunctionEnter3Info(this->funcID, elt, &this->frameInfo, &this->argInfoSize, (COR_PRF_FUNCTION_ARGUMENT_INFO*)buffer);
+        if(FAILED(hr)) return Error("enter info 2");
+
+        this->pArgInfo = unique_ptr<COR_PRF_FUNCTION_ARGUMENT_INFO>((COR_PRF_FUNCTION_ARGUMENT_INFO*)buffer);
+
+        this->started = std::chrono::high_resolution_clock::now();
+    }
+
+    void HandleLeave(ostringstream *oss) {
+        HRESULT hr;
+
+        // cerr << '\n' << pCall->funcID << " : " << functionId << '\n';
+
+        // if(call.funcID != functionId) {
+        //     cerr << call.funcID << " vs " << functionId << '\n';
+        //     return Error("WOOF!");
+        // }
+
+        auto end = std::chrono::high_resolution_clock::now();
+
+        char16_t inbuff[2048];
+        char buff[4096];
+
+
+        // oss << "\n* ENTER " << std::hex << functionId.functionID;
+
+        LPCBYTE loadAddress;
+        ULONG nameLen = 0;
+        AssemblyID assemblyId;
+        hr = pInfo->GetModuleInfo(this->moduleID, &loadAddress, nameLen, &nameLen, NULL, &assemblyId);
+        if(FAILED(hr) || nameLen > 2048) return Error("mod info");
+
+        hr = pInfo->GetModuleInfo(this->moduleID, &loadAddress, nameLen, &nameLen, inbuff, &assemblyId);
+        if(FAILED(hr)) return Error("mod info 2");
+        *oss << convert.to_bytes(inbuff) << '\n';
+
+        hr = pInfo->GetAssemblyInfo(assemblyId, 0, &nameLen, NULL, NULL, NULL);
+        if(FAILED(hr) || nameLen > 2048) return Error("asm info");
+
+        hr = pInfo->GetAssemblyInfo(assemblyId, nameLen, &nameLen, inbuff, NULL, NULL);
+        if(FAILED(hr)) return Error("asm info 2");
+        *oss << convert.to_bytes(inbuff) << '\n';
+
+        IMetaDataImport *pMeta;
+        IUnknown *pMetaUnk;
+        hr = pInfo->GetModuleMetaData(this->moduleID, ofRead | ofWrite, IID_IMetaDataImport, &pMetaUnk);
+        if(FAILED(hr)) return Error("meta interface");
+
+        hr = pMetaUnk->QueryInterface(IID_IMetaDataImport, (void **)&pMeta);
+        if(FAILED(hr)) return Error("meta interface query");
+
+
+        mdTypeDef mdType;
+        ClassID parentClassId; // not needed in our scenario 
+        ULONG32 numGenericTypeArgs = 0;
+        ClassID* genericTypeArgs = NULL;
+        hr = pInfo->GetClassIDInfo2(this->classID, NULL, &mdType, &parentClassId, 0, &numGenericTypeArgs, NULL);
+        if (FAILED(hr)) return Error("class info");
+
+
+        DWORD flags;
+        mdTypeDef mdBaseType;
+        // hr = pMets->GetTypeDefProps(mdType, inbuff, 2047, &length, &flags, &mdBaseType);
+        hr = pMeta->GetTypeDefProps(mdType, inbuff, 2047, nullptr, &flags, nullptr);
+        if (FAILED(hr)) return Error("typedefprops");
+        *oss << convert.to_bytes(inbuff) << '\n';
+
+
+        mdTypeDef type;
+        ULONG size;
+        ULONG attributes;
+        PCCOR_SIGNATURE pSig;
+        ULONG blobSize;
+        ULONG codeRva;
+        hr = pMeta->GetMethodProps(
+                this->funcToken, &type, inbuff, 2047, &size, &attributes, &pSig, &blobSize, &codeRva, &flags);
+        if(FAILED(hr)) return Error("method props");
+        *oss << convert.to_bytes(inbuff) << '\n';
+
+        *oss << std::chrono::duration_cast<std::chrono::microseconds>(end - this->started).count() << '\n';
+    }
+};
+
+
+// thread_local std::chrono::high_resolution_clock::time_point started;
+// thread_local mdToken token;
+// thread_local ClassID classId;
+// thread_local ModuleID moduleId;
+
+class ThreadContext {
+public:
+    ostringstream oss;
+    stack<CallInfo> calls;
+
+    void Enter(FunctionID funcID, COR_PRF_ELT_INFO eltInfo) {
+        this->calls.emplace();
+        this->calls.top().HandleEnter(&this->oss, funcID, eltInfo);
+    }
+
+    void Leave() {
+        auto &&call = std::move(this->calls.top());
+        this->calls.pop();
+
+        call.HandleLeave(&this->oss);
+
+        cerr << this->oss.str() << '\n';
+    }
+};
+
+
+
+thread_local ThreadContext threadCtx;
 
 PROFILER_STUB EnterStub(FunctionIDOrClientID functionId, COR_PRF_ELT_INFO eltInfo)
 {
-    printf("\r\nEnter %" UINT_PTR_FORMAT "", (UINT64)functionId.functionID);
+    threadCtx.calls.emplace();
+    threadCtx.calls.top().HandleEnter(&threadCtx.oss, functionId.functionID, eltInfo);
 }
 
 PROFILER_STUB LeaveStub(FunctionID functionId, COR_PRF_ELT_INFO eltInfo)
 {
-    printf("\r\nLeave %" UINT_PTR_FORMAT "", (UINT64)functionId);
+    threadCtx.Leave();
 }
 
 PROFILER_STUB TailcallStub(FunctionID functionId, COR_PRF_ELT_INFO eltInfo)
@@ -78,6 +239,7 @@ EXTERN_C void LeaveNaked(FunctionIDOrClientID functionIDOrClientID, COR_PRF_ELT_
 EXTERN_C void TailcallNaked(FunctionIDOrClientID functionIDOrClientID, COR_PRF_ELT_INFO eltInfo);
 #endif
 
+
 CorProfiler::CorProfiler() : refCount(0), corProfilerInfo(nullptr)
 {
 }
@@ -94,11 +256,9 @@ CorProfiler::~CorProfiler()
 HRESULT STDMETHODCALLTYPE CorProfiler::Initialize(IUnknown *pICorProfilerInfoUnk)
 {
     HRESULT queryInterfaceResult = pICorProfilerInfoUnk->QueryInterface(__uuidof(ICorProfilerInfo8), reinterpret_cast<void **>(&this->corProfilerInfo));
+    if (FAILED(queryInterfaceResult)) return E_FAIL;
 
-    if (FAILED(queryInterfaceResult))
-    {
-        return E_FAIL;
-    }
+    pInfo = this->corProfilerInfo;
 
     DWORD eventMask = COR_PRF_MONITOR_ENTERLEAVE | COR_PRF_ENABLE_FUNCTION_ARGS | COR_PRF_ENABLE_FUNCTION_RETVAL | COR_PRF_ENABLE_FRAME_INFO;
 
@@ -108,7 +268,7 @@ HRESULT STDMETHODCALLTYPE CorProfiler::Initialize(IUnknown *pICorProfilerInfoUnk
         printf("ERROR: Profiler SetEventMask failed (HRESULT: %d)", hr);
     }
 
-    hr = this->corProfilerInfo->SetEnterLeaveFunctionHooks3WithInfo(EnterNaked, LeaveNaked, TailcallNaked);
+    hr = this->corProfilerInfo->SetEnterLeaveFunctionHooks3WithInfo(EnterNaked, LeaveNaked, nullptr); // LeaveNaked, nullptr);// TailcallNaked);
 
     if (hr != S_OK)
     {
