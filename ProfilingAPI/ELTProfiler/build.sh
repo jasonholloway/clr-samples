@@ -18,5 +18,5 @@ INCLUDES="-I $CORECLR_PATH/src/pal/inc/rt -I $CORECLR_PATH/src/pal/prebuilt/inc 
 
 echo clang++ -shared -o $Output $CXX_FLAGS $INCLUDES ClassFactory.cpp CorProfiler.cpp dllmain.cpp asmhelpers/amd64/systemv/asmhelpers.S
 
-clang++ -shared -o $Output $CXX_FLAGS $INCLUDES ClassFactory.cpp CorProfiler.cpp dllmain.cpp asmhelpers/amd64/systemv/asmhelpers.S
+clang++ -shared -g -O0 -fno-limit-debug-info -o $Output $CXX_FLAGS $INCLUDES ClassFactory.cpp CorProfiler.cpp dllmain.cpp asmhelpers/amd64/systemv/asmhelpers.S
 printf 'Done.\n'

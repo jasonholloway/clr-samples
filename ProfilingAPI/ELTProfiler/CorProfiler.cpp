@@ -16,150 +16,103 @@
 #include <chrono>
 #include <thread>
 #include <stack>
-#include <vector>
+#include <list>
 #include <utility>
+#include <mutex>
 
 using namespace std;
 
-ICorProfilerInfo8 *pInfo = nullptr;
-
-
 void Error(const char *str) {
-    printf("ERROR! %s\n", str);
+    cerr << "ERROR: " << str << '\n';
 }
 
+ICorProfilerInfo8 *pInfo = nullptr;
 std::wstring_convert<std::codecvt_utf8_utf16<char16_t>,char16_t> convert;
 
-
-typedef struct CallInfo {
-    std::chrono::high_resolution_clock::time_point started;
-    FunctionID funcID;
-    mdToken funcToken;
+class FuncInfo {
+public:
+    FunctionID id;
+    mdToken token;
     ClassID classID;
+    mdTypeDef classToken;
     ModuleID moduleID;
 
-    ULONG argInfoSize;
-    unique_ptr<COR_PRF_FUNCTION_ARGUMENT_INFO> pArgInfo;
-    COR_PRF_FRAME_INFO frameInfo;
-
-    void HandleEnter(ostringstream *oss, FunctionID funcID, COR_PRF_ELT_INFO elt) {
-        HRESULT hr;
-
-        this->funcID = funcID;
-        hr = pInfo->GetFunctionInfo(funcID, &this->classID, &this->moduleID, &this->funcToken);
-        if(FAILED(hr)) return Error("func info");
-
-        ULONG argumentInfoSize = 0;
-        COR_PRF_FRAME_INFO frameInfo;
-        hr = pInfo->GetFunctionEnter3Info(this->funcID, elt, &this->frameInfo, &this->argInfoSize, NULL);
-
-        unsigned char *buffer = new unsigned char[this->argInfoSize];
-        hr = pInfo->GetFunctionEnter3Info(this->funcID, elt, &this->frameInfo, &this->argInfoSize, (COR_PRF_FUNCTION_ARGUMENT_INFO*)buffer);
-        if(FAILED(hr)) return Error("enter info 2");
-
-        this->pArgInfo = unique_ptr<COR_PRF_FUNCTION_ARGUMENT_INFO>((COR_PRF_FUNCTION_ARGUMENT_INFO*)buffer);
-
-        this->started = std::chrono::high_resolution_clock::now();
-    }
-
-    void HandleLeave(ostringstream *oss) {
-        HRESULT hr;
-
-        // cerr << '\n' << pCall->funcID << " : " << functionId << '\n';
-
-        // if(call.funcID != functionId) {
-        //     cerr << call.funcID << " vs " << functionId << '\n';
-        //     return Error("WOOF!");
-        // }
-
-        auto end = std::chrono::high_resolution_clock::now();
-
-        char16_t inbuff[2048];
-        char buff[4096];
-
-
-        // oss << "\n* ENTER " << std::hex << functionId.functionID;
-
-        LPCBYTE loadAddress;
-        ULONG nameLen = 0;
-        AssemblyID assemblyId;
-        hr = pInfo->GetModuleInfo(this->moduleID, &loadAddress, nameLen, &nameLen, NULL, &assemblyId);
-        if(FAILED(hr) || nameLen > 2048) return Error("mod info");
-
-        hr = pInfo->GetModuleInfo(this->moduleID, &loadAddress, nameLen, &nameLen, inbuff, &assemblyId);
-        if(FAILED(hr)) return Error("mod info 2");
-        *oss << convert.to_bytes(inbuff) << '\n';
-
-        hr = pInfo->GetAssemblyInfo(assemblyId, 0, &nameLen, NULL, NULL, NULL);
-        if(FAILED(hr) || nameLen > 2048) return Error("asm info");
-
-        hr = pInfo->GetAssemblyInfo(assemblyId, nameLen, &nameLen, inbuff, NULL, NULL);
-        if(FAILED(hr)) return Error("asm info 2");
-        *oss << convert.to_bytes(inbuff) << '\n';
-
-        IMetaDataImport *pMeta;
-        IUnknown *pMetaUnk;
-        hr = pInfo->GetModuleMetaData(this->moduleID, ofRead | ofWrite, IID_IMetaDataImport, &pMetaUnk);
-        if(FAILED(hr)) return Error("meta interface");
-
-        hr = pMetaUnk->QueryInterface(IID_IMetaDataImport, (void **)&pMeta);
-        if(FAILED(hr)) return Error("meta interface query");
-
-
-        mdTypeDef mdType;
-        ClassID parentClassId; // not needed in our scenario 
-        ULONG32 numGenericTypeArgs = 0;
-        ClassID* genericTypeArgs = NULL;
-        hr = pInfo->GetClassIDInfo2(this->classID, NULL, &mdType, &parentClassId, 0, &numGenericTypeArgs, NULL);
-        if (FAILED(hr)) return Error("class info");
-
-
-        DWORD flags;
-        mdTypeDef mdBaseType;
-        // hr = pMets->GetTypeDefProps(mdType, inbuff, 2047, &length, &flags, &mdBaseType);
-        hr = pMeta->GetTypeDefProps(mdType, inbuff, 2047, nullptr, &flags, nullptr);
-        if (FAILED(hr)) return Error("typedefprops");
-        *oss << convert.to_bytes(inbuff) << '\n';
-
-
-        mdTypeDef type;
-        ULONG size;
-        ULONG attributes;
-        PCCOR_SIGNATURE pSig;
-        ULONG blobSize;
-        ULONG codeRva;
-        hr = pMeta->GetMethodProps(
-                this->funcToken, &type, inbuff, 2047, &size, &attributes, &pSig, &blobSize, &codeRva, &flags);
-        if(FAILED(hr)) return Error("method props");
-        *oss << convert.to_bytes(inbuff) << '\n';
-
-        *oss << std::chrono::duration_cast<std::chrono::microseconds>(end - this->started).count() << '\n';
-    }
+    string funcName;
+    string className;
+    string moduleName;
+    string assemblyName;
 };
 
 
-// thread_local std::chrono::high_resolution_clock::time_point started;
-// thread_local mdToken token;
-// thread_local ClassID classId;
-// thread_local ModuleID moduleId;
+
+class CallInfo {
+    std::chrono::high_resolution_clock::time_point started;
+    FuncInfo *pFunc;
+    ULONG argInfoSize;
+    unique_ptr<COR_PRF_FUNCTION_ARGUMENT_INFO> pArgInfo;
+    COR_PRF_FRAME_INFO frameInfo;
+    thread::id thread0;
+    thread::id thread1;
+
+public:
+    void Enter(ostringstream *oss, FuncInfo *pFunc, COR_PRF_ELT_INFO elt) {
+        HRESULT hr;
+
+        this->thread0 = this_thread::get_id();
+
+        ULONG argumentInfoSize = 0;
+        COR_PRF_FRAME_INFO frameInfo;
+        hr = pInfo->GetFunctionEnter3Info(pFunc->id, elt, &this->frameInfo, &this->argInfoSize, NULL);
+        if(hr != 0x8007007A) {
+            cerr << hex << hr << '\n';
+            return Error("Unexpected response from GetFunctionEnter3Info");
+        }
+
+        unsigned char *buffer = new unsigned char[this->argInfoSize];
+        hr = pInfo->GetFunctionEnter3Info(pFunc->id, elt, &this->frameInfo, &this->argInfoSize, (COR_PRF_FUNCTION_ARGUMENT_INFO*)buffer);
+        if(FAILED(hr)) {
+            cerr << "0x" << hex << hr << '\n';
+            return Error("enter info 2");
+        }
+
+        this->pArgInfo = unique_ptr<COR_PRF_FUNCTION_ARGUMENT_INFO>((COR_PRF_FUNCTION_ARGUMENT_INFO*)buffer);
+
+        this->pFunc = pFunc;
+        this->started = std::chrono::high_resolution_clock::now();
+    }
+
+    void Leave(ostringstream *oss) {
+        HRESULT hr;
+
+        auto end = std::chrono::high_resolution_clock::now();
+        auto threadId = this_thread::get_id();
+
+        *oss << hex << 'T' << threadId << " " << this->pFunc->className << '{' << this->pFunc->classToken << "}." << this->pFunc->funcName << '{' << this->pFunc->token << "} (" << dec << std::chrono::duration_cast<std::chrono::microseconds>(end - this->started).count() << " microseconds)";
+    }
+};
 
 class ThreadContext {
-public:
     ostringstream oss;
     stack<CallInfo> calls;
 
-    void Enter(FunctionID funcID, COR_PRF_ELT_INFO eltInfo) {
+public:
+    void Enter(FuncInfo *pFunc, COR_PRF_ELT_INFO eltInfo) {
+        if(pFunc->id == 0) return;
+        
         this->calls.emplace();
-        this->calls.top().HandleEnter(&this->oss, funcID, eltInfo);
+        this->calls.top().Enter(&this->oss, pFunc, eltInfo);
     }
 
-    void Leave() {
+    void Leave(FuncInfo *pFunc) {
+        if(pFunc->id == 0) return;
+
         auto &&call = std::move(this->calls.top());
         this->calls.pop();
 
-        call.HandleLeave(&this->oss);
+        call.Leave(&this->oss);
 
         cerr << this->oss.str() << '\n';
+        this->oss = ostringstream();
     }
 };
 
@@ -169,18 +122,20 @@ thread_local ThreadContext threadCtx;
 
 PROFILER_STUB EnterStub(FunctionIDOrClientID functionId, COR_PRF_ELT_INFO eltInfo)
 {
-    threadCtx.calls.emplace();
-    threadCtx.calls.top().HandleEnter(&threadCtx.oss, functionId.functionID, eltInfo);
+    // cerr << "ENTER " << hex << functionId.clientID <<'\n';
+    threadCtx.Enter((FuncInfo*)functionId.clientID, eltInfo);
 }
 
-PROFILER_STUB LeaveStub(FunctionID functionId, COR_PRF_ELT_INFO eltInfo)
+PROFILER_STUB LeaveStub(FunctionIDOrClientID functionId, COR_PRF_ELT_INFO eltInfo)
 {
-    threadCtx.Leave();
+    // cerr << "LEAVE " << hex << functionId.clientID <<'\n';
+    threadCtx.Leave((FuncInfo*)functionId.clientID);
 }
 
-PROFILER_STUB TailcallStub(FunctionID functionId, COR_PRF_ELT_INFO eltInfo)
+PROFILER_STUB TailcallStub(FunctionIDOrClientID functionId, COR_PRF_ELT_INFO eltInfo)
 {
-    printf("\r\nTailcall %" UINT_PTR_FORMAT "", (UINT64)functionId);
+    // cerr << "TAILCALL " << hex << functionId.clientID <<'\n';
+    threadCtx.Leave((FuncInfo*)functionId.clientID);
 }
 
 #ifdef _X86_
@@ -240,6 +195,92 @@ EXTERN_C void TailcallNaked(FunctionIDOrClientID functionIDOrClientID, COR_PRF_E
 #endif
 
 
+std::mutex funcsMutex;
+std::list<FuncInfo> funcs;
+
+EXTERN_C UINT_PTR FuncMapper(FunctionID funcID, BOOL *result) {
+    HRESULT hr;
+    FuncInfo func;
+
+    *result = FALSE;
+
+    func.id = funcID;
+
+    hr = pInfo->GetFunctionInfo(funcID, &func.classID, &func.moduleID, &func.token);
+    if(FAILED(hr)) { Error("func info"); return 0; }
+
+    if(func.classID == 0) {
+        //generic class, sidestep
+        func.funcName = string("GENERIC");
+        *result = FALSE;
+        return funcID;
+    }
+
+    char16_t inbuff[2048];
+    char buff[4096];
+
+    LPCBYTE loadAddress;
+    ULONG nameLen = 0;
+    AssemblyID assemblyId;
+    hr = pInfo->GetModuleInfo(func.moduleID, &loadAddress, nameLen, &nameLen, NULL, &assemblyId);
+    if(FAILED(hr) || nameLen > 2048) { Error("mod info"); return 0; }
+
+    hr = pInfo->GetModuleInfo(func.moduleID, &loadAddress, nameLen, &nameLen, inbuff, &assemblyId);
+    if(FAILED(hr)) { Error("mod info 2"); return 0; };
+    func.moduleName = string(convert.to_bytes(inbuff));
+    // *oss << convert.to_bytes(inbuff) << '\n';
+
+    hr = pInfo->GetAssemblyInfo(assemblyId, 0, &nameLen, NULL, NULL, NULL);
+    if(FAILED(hr) || nameLen > 2048) { Error("asm info"); return 0; }
+
+    hr = pInfo->GetAssemblyInfo(assemblyId, nameLen, &nameLen, inbuff, NULL, NULL);
+    if(FAILED(hr)) { Error("asm info 2"); return 0; }
+    func.assemblyName = string(convert.to_bytes(inbuff));
+
+    mdTypeDef mdType;
+    ClassID parentClassId; // not needed in our scenario 
+    ULONG32 numGenericTypeArgs = 0;
+    ClassID* genericTypeArgs = NULL;
+    
+    hr = pInfo->GetClassIDInfo2(func.classID, NULL, &func.classToken, &parentClassId, 0, &numGenericTypeArgs, NULL);
+    if (FAILED(hr)) { cerr << hex << hr; Error("class info"); return 0; }
+
+
+    IMetaDataImport *pMeta;
+    IUnknown *pMetaUnk;
+    hr = pInfo->GetModuleMetaData(func.moduleID, ofRead | ofWrite, IID_IMetaDataImport, &pMetaUnk);
+    if(FAILED(hr)) { Error("meta interface"); return 0; }
+
+    hr = pMetaUnk->QueryInterface(IID_IMetaDataImport, (void **)&pMeta);
+    if(FAILED(hr)) { Error("meta interface query"); return 0; }
+
+    DWORD flags;
+    mdTypeDef mdBaseType;
+    hr = pMeta->GetTypeDefProps(func.classToken, inbuff, 2047, nullptr, &flags, nullptr);
+    if (FAILED(hr)) { Error("typedefprops"); return 0; }
+    func.className = string(convert.to_bytes(inbuff).data());
+
+    mdTypeDef type;
+    ULONG size;
+    ULONG attributes;
+    PCCOR_SIGNATURE pSig;
+    ULONG blobSize;
+    ULONG codeRva;
+    hr = pMeta->GetMethodProps(func.token, &type, inbuff, 2047, &size, &attributes, &pSig, &blobSize, &codeRva, &flags);
+    if(FAILED(hr)) { Error("method props"); return 0; }
+    func.funcName = string(convert.to_bytes(inbuff));
+
+    *result = TRUE;
+
+    {
+        std::lock_guard<std::mutex> lock(funcsMutex);
+        funcs.push_back(std::move(func));
+    }
+       
+    return (UINT_PTR)&funcs.back();
+}
+
+
 CorProfiler::CorProfiler() : refCount(0), corProfilerInfo(nullptr)
 {
 }
@@ -263,17 +304,13 @@ HRESULT STDMETHODCALLTYPE CorProfiler::Initialize(IUnknown *pICorProfilerInfoUnk
     DWORD eventMask = COR_PRF_MONITOR_ENTERLEAVE | COR_PRF_ENABLE_FUNCTION_ARGS | COR_PRF_ENABLE_FUNCTION_RETVAL | COR_PRF_ENABLE_FRAME_INFO;
 
     auto hr = this->corProfilerInfo->SetEventMask(eventMask);
-    if (hr != S_OK)
-    {
-        printf("ERROR: Profiler SetEventMask failed (HRESULT: %d)", hr);
-    }
+    if(FAILED(hr)) Error("Failed to set event mask");
 
-    hr = this->corProfilerInfo->SetEnterLeaveFunctionHooks3WithInfo(EnterNaked, LeaveNaked, nullptr); // LeaveNaked, nullptr);// TailcallNaked);
+    hr = this->corProfilerInfo->SetEnterLeaveFunctionHooks3WithInfo(EnterNaked, LeaveNaked, TailcallNaked);
+    if(FAILED(hr)) Error("Failed to register hooks");
 
-    if (hr != S_OK)
-    {
-        printf("ERROR: Profiler SetEnterLeaveFunctionHooks3WithInfo failed (HRESULT: %d)", hr);
-    }
+    hr = this->corProfilerInfo->SetFunctionIDMapper(FuncMapper);
+    if(FAILED(hr)) Error("Failed to set function mapper");
 
     return S_OK;
 }
@@ -411,11 +448,13 @@ HRESULT STDMETHODCALLTYPE CorProfiler::JITInlining(FunctionID callerId, Function
 
 HRESULT STDMETHODCALLTYPE CorProfiler::ThreadCreated(ThreadID threadId)
 {
+    cerr << "THREAD " << threadId << " CREATED [" << this_thread::get_id() <<  "]\n";
     return S_OK;
 }
 
 HRESULT STDMETHODCALLTYPE CorProfiler::ThreadDestroyed(ThreadID threadId)
 {
+    cerr << "THREAD " << threadId << " DESTROYED [" << this_thread::get_id() <<  "]\n";
     return S_OK;
 }
 
