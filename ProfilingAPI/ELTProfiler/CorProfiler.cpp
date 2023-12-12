@@ -1,3 +1,4 @@
+
 #include "CorProfiler.h"
 #include "corhlpr.h"
 #include "CComPtr.h"
@@ -17,13 +18,6 @@
 #include <utility>
 #include <mutex>
 #include <algorithm>
-// #include <variant>
-// #include <typeinfo>
-
-// template<typename ... Ts>                                                 
-// struct Overload : Ts ... { 
-//     using Ts::operator() ...;
-// };
 
 using namespace std;
 
@@ -96,23 +90,17 @@ public:
 };
 
 
+enum EventSignal { End };
+
+union Event {
+    CallInfo call;
+    EventSignal signal;
+};
 
 
 
-// enum EventSignal { End };
-
-// typedef std::variant<CallInfo, EventSignal> Event;
-
-
-
-
-
-
-
-
-// std::mutex mxEvents;
-// std::deque<Event> qEvents;
-
+std::mutex mxEvents;
+std::deque<Event> qEvents;
 
 class ThreadContext {
     ostringstream oss;
@@ -134,8 +122,10 @@ public:
 
         call.Leave();
 
-        // std::lock_guard<std::mutex> lock(mxEvents);
-        // qEvents.push_back(std::move(call));
+        Event ev = { std::move(call) };
+
+        std::lock_guard<std::mutex> lock(mxEvents);
+        qEvents.push_back(ev);
 
         // cerr << this->oss.str() << '\n';
         // this->oss = ostringstream();
