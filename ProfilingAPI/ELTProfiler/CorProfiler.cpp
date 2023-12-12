@@ -1,6 +1,3 @@
-// Copyright (c) .NET Foundation and contributors. All rights reserved.
-// Licensed under the MIT license. See LICENSE file in the project root for full license information.
-
 #include "CorProfiler.h"
 #include "corhlpr.h"
 #include "CComPtr.h"
@@ -19,6 +16,14 @@
 #include <list>
 #include <utility>
 #include <mutex>
+#include <algorithm>
+// #include <variant>
+// #include <typeinfo>
+
+// template<typename ... Ts>                                                 
+// struct Overload : Ts ... { 
+//     using Ts::operator() ...;
+// };
 
 using namespace std;
 
@@ -28,6 +33,7 @@ void Error(const char *str) {
 
 ICorProfilerInfo8 *pInfo = nullptr;
 std::wstring_convert<std::codecvt_utf8_utf16<char16_t>,char16_t> convert;
+
 
 class FuncInfo {
 public:
@@ -43,10 +49,11 @@ public:
     string assemblyName;
 };
 
-
-
 class CallInfo {
+public:
     std::chrono::high_resolution_clock::time_point started;
+    std::chrono::high_resolution_clock::time_point ended;
+
     FuncInfo *pFunc;
     ULONG argInfoSize;
     unique_ptr<COR_PRF_FUNCTION_ARGUMENT_INFO> pArgInfo;
@@ -54,8 +61,7 @@ class CallInfo {
     thread::id thread0;
     thread::id thread1;
 
-public:
-    void Enter(ostringstream *oss, FuncInfo *pFunc, COR_PRF_ELT_INFO elt) {
+    void Enter(FuncInfo *pFunc, COR_PRF_ELT_INFO elt) {
         HRESULT hr;
 
         this->thread0 = this_thread::get_id();
@@ -81,15 +87,32 @@ public:
         this->started = std::chrono::high_resolution_clock::now();
     }
 
-    void Leave(ostringstream *oss) {
+    void Leave() {
         HRESULT hr;
 
         auto end = std::chrono::high_resolution_clock::now();
         auto threadId = this_thread::get_id();
-
-        *oss << hex << 'T' << threadId << " " << this->pFunc->className << '{' << this->pFunc->classToken << "}." << this->pFunc->funcName << '{' << this->pFunc->token << "} (" << dec << std::chrono::duration_cast<std::chrono::microseconds>(end - this->started).count() << " microseconds)";
     }
 };
+
+
+
+
+
+// enum EventSignal { End };
+
+// typedef std::variant<CallInfo, EventSignal> Event;
+
+
+
+
+
+
+
+
+// std::mutex mxEvents;
+// std::deque<Event> qEvents;
+
 
 class ThreadContext {
     ostringstream oss;
@@ -100,7 +123,7 @@ public:
         if(pFunc->id == 0) return;
         
         this->calls.emplace();
-        this->calls.top().Enter(&this->oss, pFunc, eltInfo);
+        this->calls.top().Enter(pFunc, eltInfo);
     }
 
     void Leave(FuncInfo *pFunc) {
@@ -109,12 +132,62 @@ public:
         auto &&call = std::move(this->calls.top());
         this->calls.pop();
 
-        call.Leave(&this->oss);
+        call.Leave();
 
-        cerr << this->oss.str() << '\n';
-        this->oss = ostringstream();
+        // std::lock_guard<std::mutex> lock(mxEvents);
+        // qEvents.push_back(std::move(call));
+
+        // cerr << this->oss.str() << '\n';
+        // this->oss = ostringstream();
+
+        // *oss << hex << 'T' << threadId << " " << this->pFunc->className << '{' << this->pFunc->classToken << "}." << this->pFunc->funcName << '{' << this->pFunc->token << "} (" << dec << std::chrono::duration_cast<std::chrono::microseconds>(end - this->started).count() << " microseconds)";
     }
 };
+
+// void runListener() {
+//     thread listener {
+//         [&]() {
+//         while(TRUE) {
+//                 std::deque<Event> evs;
+
+//                 {
+//                     std::lock_guard<std::mutex> lock(mxEvents);
+//                     evs.insert(evs.begin(), std::make_move_iterator(qEvents.begin()), std::make_move_iterator(qEvents.end()));
+//                     qEvents.erase(qEvents.begin(), qEvents.end());
+//                 }
+
+//                 if(evs.size() == 0) {
+//                     std::this_thread::sleep_for(chrono::milliseconds(15));
+//                 }
+//                 else {
+//                     // auto visitor = Overload {
+//                     //     [](CallInfo call) {
+//                     //         ostringstream oss;
+
+//                     //         oss << hex << 'T' << call.thread1 << " " << call.pFunc->className << '{' << call.pFunc->classToken << "}." << call.pFunc->funcName << '{' << call.pFunc->token << "} (" << dec << std::chrono::duration_cast<std::chrono::microseconds>(call.ended - call.started).count() << " microseconds)" << '\n';
+
+//                     //         cerr << oss.str();
+//                     //         return TRUE;
+//                     //     },
+//                     //     [](EventSignal e) {
+//                     //         return FALSE;
+//                     //     }
+//                     // };
+
+//                     // for(auto &ev : evs) {
+//                     //     if(!std::visit(visitor, ev)) {
+//                     //         break outer;
+//                     //     }
+//                     // }
+//                 }
+//             }
+//         }
+//     };
+
+//     listener.join();
+// }
+
+
 
 
 

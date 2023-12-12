@@ -7,7 +7,7 @@
 -DBIT64
 -DPAL_STDCPP_COMPAT
 -DPLATFORM_UNIX
--std=c++11
+-std=c++20
 -I/home/jason/src/coreclr-3.1.32/src/pal/inc/rt
 -I/home/jason/src/coreclr-3.1.32/src/pal/prebuilt/inc
 -I/home/jason/src/coreclr-3.1.32/src/pal/inc
