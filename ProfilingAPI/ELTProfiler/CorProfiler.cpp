@@ -4,6 +4,7 @@
 #include "CComPtr.h"
 #include "profiler_pal.h"
 #include <cstddef>
+#include <cstdlib>
 #include <cuchar>
 #include <string>
 #include <cstring>
@@ -29,6 +30,9 @@ void Error(const char *str) {
 ICorProfilerInfo8 *pInfo = nullptr;
 std::wstring_convert<std::codecvt_utf8_utf16<char16_t>,char16_t> convert;
 std::ofstream fout("calls.log");
+
+auto classMatch = getenv("CALLPROF_CLASS");
+auto funcMatch = getenv("CALLPROF_FUNC");
 
 class FuncInfo {
 public:
@@ -293,6 +297,10 @@ EXTERN_C UINT_PTR FuncMapper(FunctionID funcID, BOOL *result) {
     if (FAILED(hr)) { Error("typedefprops"); return 0; }
     func.className = string(convert.to_bytes(inbuff).data());
 
+    if(classMatch && func.className != classMatch) {
+        return 0;
+    }
+
     mdTypeDef type;
     ULONG size;
     ULONG attributes;
@@ -303,13 +311,11 @@ EXTERN_C UINT_PTR FuncMapper(FunctionID funcID, BOOL *result) {
     if(FAILED(hr)) { Error("method props"); return 0; }
     func.funcName = string(convert.to_bytes(inbuff));
 
-    if(func.funcName.compare("GetBuffer") == 0) {
-        *result = TRUE;
+    if(funcMatch && func.funcName != funcMatch) {
+        return 0;
     }
 
-
-// System.IO.FileStream{2000565}.GetBuffer
-
+    *result = TRUE;
 
     {
         std::lock_guard<std::mutex> lock(funcsMutex);
