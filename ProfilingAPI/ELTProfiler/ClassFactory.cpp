@@ -3,6 +3,7 @@
 
 #include "ClassFactory.h"
 #include "CorProfiler.h"
+#include <iostream>
 
 ClassFactory::ClassFactory() : refCount(0)
 {

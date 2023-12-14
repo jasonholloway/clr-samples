@@ -18,6 +18,7 @@
 #include <utility>
 #include <mutex>
 #include <algorithm>
+#include <fstream>
 
 using namespace std;
 
@@ -27,7 +28,7 @@ void Error(const char *str) {
 
 ICorProfilerInfo8 *pInfo = nullptr;
 std::wstring_convert<std::codecvt_utf8_utf16<char16_t>,char16_t> convert;
-
+std::ofstream fout("calls.log");
 
 class FuncInfo {
 public:
@@ -52,13 +53,12 @@ public:
     ULONG argInfoSize;
     unique_ptr<COR_PRF_FUNCTION_ARGUMENT_INFO> pArgInfo;
     COR_PRF_FRAME_INFO frameInfo;
-    thread::id thread0;
-    thread::id thread1;
+    size_t threadHash;
 
     void Enter(FuncInfo *pFunc, COR_PRF_ELT_INFO elt) {
         HRESULT hr;
 
-        this->thread0 = this_thread::get_id();
+        this->threadHash = hash<thread::id>()(this_thread::get_id());
 
         ULONG argumentInfoSize = 0;
         COR_PRF_FRAME_INFO frameInfo;
@@ -82,25 +82,35 @@ public:
     }
 
     void Leave() {
-        HRESULT hr;
-
-        auto end = std::chrono::high_resolution_clock::now();
-        auto threadId = this_thread::get_id();
+        this->ended = std::chrono::high_resolution_clock::now();
     }
 };
 
 
-enum EventSignal { End };
 
-union Event {
-    CallInfo call;
-    EventSignal signal;
+enum EventTag { Call, End };
+
+class Event {
+public:
+    EventTag tag;
+
+    Event(EventTag tag) {
+        this->tag = tag;
+    }
 };
 
-
+class CallEvent : public Event {
+public:
+    CallInfo call;
+    
+    CallEvent(CallInfo& call) : Event(EventTag::Call) {
+        this->call = std::move(call);
+    }
+};
+    
 
 std::mutex mxEvents;
-std::deque<Event> qEvents;
+std::deque<unique_ptr<Event>> qEvents;
 
 class ThreadContext {
     ostringstream oss;
@@ -122,10 +132,10 @@ public:
 
         call.Leave();
 
-        Event ev = { std::move(call) };
+        auto ev = unique_ptr<Event>(new CallEvent(call));
 
         std::lock_guard<std::mutex> lock(mxEvents);
-        qEvents.push_back(ev);
+        qEvents.push_back(std::move(ev));
 
         // cerr << this->oss.str() << '\n';
         // this->oss = ostringstream();
@@ -134,48 +144,8 @@ public:
     }
 };
 
-// void runListener() {
-//     thread listener {
-//         [&]() {
-//         while(TRUE) {
-//                 std::deque<Event> evs;
 
-//                 {
-//                     std::lock_guard<std::mutex> lock(mxEvents);
-//                     evs.insert(evs.begin(), std::make_move_iterator(qEvents.begin()), std::make_move_iterator(qEvents.end()));
-//                     qEvents.erase(qEvents.begin(), qEvents.end());
-//                 }
 
-//                 if(evs.size() == 0) {
-//                     std::this_thread::sleep_for(chrono::milliseconds(15));
-//                 }
-//                 else {
-//                     // auto visitor = Overload {
-//                     //     [](CallInfo call) {
-//                     //         ostringstream oss;
-
-//                     //         oss << hex << 'T' << call.thread1 << " " << call.pFunc->className << '{' << call.pFunc->classToken << "}." << call.pFunc->funcName << '{' << call.pFunc->token << "} (" << dec << std::chrono::duration_cast<std::chrono::microseconds>(call.ended - call.started).count() << " microseconds)" << '\n';
-
-//                     //         cerr << oss.str();
-//                     //         return TRUE;
-//                     //     },
-//                     //     [](EventSignal e) {
-//                     //         return FALSE;
-//                     //     }
-//                     // };
-
-//                     // for(auto &ev : evs) {
-//                     //     if(!std::visit(visitor, ev)) {
-//                     //         break outer;
-//                     //     }
-//                     // }
-//                 }
-//             }
-//         }
-//     };
-
-//     listener.join();
-// }
 
 
 
@@ -333,7 +303,13 @@ EXTERN_C UINT_PTR FuncMapper(FunctionID funcID, BOOL *result) {
     if(FAILED(hr)) { Error("method props"); return 0; }
     func.funcName = string(convert.to_bytes(inbuff));
 
-    *result = TRUE;
+    if(func.funcName.compare("GetBuffer") == 0) {
+        *result = TRUE;
+    }
+
+
+// System.IO.FileStream{2000565}.GetBuffer
+
 
     {
         std::lock_guard<std::mutex> lock(funcsMutex);
@@ -375,18 +351,73 @@ HRESULT STDMETHODCALLTYPE CorProfiler::Initialize(IUnknown *pICorProfilerInfoUnk
     hr = this->corProfilerInfo->SetFunctionIDMapper(FuncMapper);
     if(FAILED(hr)) Error("Failed to set function mapper");
 
+    //thread should be stored obvs
+
+    this->listening = this->RunListener();
+
     return S_OK;
 }
 
 HRESULT STDMETHODCALLTYPE CorProfiler::Shutdown()
 {
-    if (this->corProfilerInfo != nullptr)
-    {
+    if(this->corProfilerInfo != nullptr) {
         this->corProfilerInfo->Release();
         this->corProfilerInfo = nullptr;
     }
 
+    {
+        auto ev = unique_ptr<Event>(new Event(EventTag::End));
+        std::lock_guard<std::mutex> lock(mxEvents);
+        qEvents.push_back(std::move(ev));
+    }
+
+    if(this->listening.joinable()) {
+        this->listening.join();
+    }
+
     return S_OK;
+}
+
+thread CorProfiler::RunListener() {
+    thread listener {
+        [&]() {
+            while(TRUE) {
+                std::deque<unique_ptr<Event>> evs;
+
+                {
+                    std::lock_guard<std::mutex> lock(mxEvents);
+                    evs.insert(evs.begin(), std::make_move_iterator(qEvents.begin()), std::make_move_iterator(qEvents.end()));
+                    qEvents.erase(qEvents.begin(), qEvents.end());
+                }
+
+                if(evs.size() == 0) {
+                    std::this_thread::sleep_for(chrono::milliseconds(15));
+                }
+                else {
+                    for(auto &ev : evs) {
+                        switch(ev->tag) {
+                            case EventTag::Call: {
+                                ostringstream oss;
+
+                                auto call = std::move(((CallEvent *)ev.get())->call);
+
+                                oss << hex << 'T' << call.threadHash << " " << call.pFunc->className << '{' << call.pFunc->classToken << "}." << call.pFunc->funcName << '{' << call.pFunc->token << "} (" << dec << std::chrono::duration_cast<std::chrono::microseconds>(call.ended - call.started).count() << " microseconds)" << '\n';
+
+                                fout << oss.str();
+                                break;
+                            }
+
+                            case EventTag::End: {
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    };
+
+    return std::move(listener);
 }
 
 HRESULT STDMETHODCALLTYPE CorProfiler::AppDomainCreationStarted(AppDomainID appDomainId)

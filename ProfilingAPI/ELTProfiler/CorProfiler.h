@@ -4,6 +4,7 @@
 #pragma once
 
 #include <atomic>
+#include <thread>
 #include "cor.h"
 #include "corprof.h"
 
@@ -12,11 +13,16 @@ class CorProfiler : public ICorProfilerCallback8
 private:
     std::atomic<int> refCount;
     ICorProfilerInfo8* corProfilerInfo;
+    std::thread listening;
+    
 public:
     CorProfiler();
     virtual ~CorProfiler();
     HRESULT STDMETHODCALLTYPE Initialize(IUnknown* pICorProfilerInfoUnk) override;
     HRESULT STDMETHODCALLTYPE Shutdown() override;
+
+    std::thread RunListener();
+    
     HRESULT STDMETHODCALLTYPE AppDomainCreationStarted(AppDomainID appDomainId) override;
     HRESULT STDMETHODCALLTYPE AppDomainCreationFinished(AppDomainID appDomainId, HRESULT hrStatus) override;
     HRESULT STDMETHODCALLTYPE AppDomainShutdownStarted(AppDomainID appDomainId) override;
